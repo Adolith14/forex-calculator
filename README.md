@@ -1,2 +1,1 @@
-"# forex-tools" 
 "# forex-calculator" 
