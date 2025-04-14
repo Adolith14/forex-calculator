@@ -1,4 +1,4 @@
-package com.teamwork.forexcalculator.user.securityConfig;
+package com.teamwork.forexcalculator.user.securities.jwt;
 
 import io.jsonwebtoken.JwtException;
 import io.jsonwebtoken.Jwts;

@@ -1,4 +1,4 @@
-package com.teamwork.forexcalculator.user.securityConfig;
+package com.teamwork.forexcalculator.user.securities.passwordEncoder;
 
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;

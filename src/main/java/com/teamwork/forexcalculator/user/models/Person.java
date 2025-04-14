@@ -23,6 +23,9 @@ public class Person {
     private String email;
     private String password;
 
+    @Column(nullable = false)
+    private boolean verified = false;
+
     @Enumerated(EnumType.STRING)
     private Role role = Role.USER;
 }

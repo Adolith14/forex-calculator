@@ -1,11 +1,11 @@
-package com.teamwork.forexcalculator.user.service;
+package com.teamwork.forexcalculator.user.service.emailService;
 
 import org.springframework.mail.SimpleMailMessage;
 import org.springframework.mail.javamail.JavaMailSender;
 import org.springframework.stereotype.Service;
 
 @Service
-public class EmailServiceImpl implements EmailService{
+public class EmailServiceImpl implements EmailService {
 
     private final JavaMailSender javaMailSender;
 
@@ -24,5 +24,17 @@ public class EmailServiceImpl implements EmailService{
         javaMailSender.send(message);
 
         return "Login token send to your email";
+    }
+
+    @Override
+    public String sendOtpCode(String email, String otp) {
+        SimpleMailMessage message = new SimpleMailMessage();
+        message.setTo(email);
+        message.setSubject("Email Verification OTP");
+        message.setText("Your OTP code is: " + otp);
+        message.setFrom("your_email@example.com");
+        javaMailSender.send(message);
+
+        return "Email verification OTP send to your email";
     }
 }
