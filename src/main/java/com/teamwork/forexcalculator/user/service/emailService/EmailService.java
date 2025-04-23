@@ -4,4 +4,6 @@ public interface EmailService {
 
     String sendLoginToken(String email, String token);
     String sendOtpCode(String email, String otp);
+
+    String resetPasswordEmail(String email, String otp);
 }

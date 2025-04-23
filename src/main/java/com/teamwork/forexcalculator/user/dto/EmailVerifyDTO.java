@@ -3,7 +3,7 @@ package com.teamwork.forexcalculator.user.dto;
 import lombok.Data;
 
 @Data
-public class OtpVerifyRequest {
+public class EmailVerifyDTO {
     private String email;
-    private String code;
+    private String otpCode;
 }

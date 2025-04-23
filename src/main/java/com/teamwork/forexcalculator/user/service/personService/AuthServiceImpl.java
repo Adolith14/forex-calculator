@@ -30,20 +30,20 @@ public class AuthServiceImpl implements AuthService {
     private final EmailVerificationTokenRepository emailVerificationTokenRepo;
 
     @Override
-    public String registerUser(RegistrationRequest registrationRequest) {
-        if (!registrationRequest.getPassword().equals(registrationRequest.getConfirmPassword())) {
+    public String registerUser(RegistrationDTO registrationDTO) {
+        if (!registrationDTO.getPassword().equals(registrationDTO.getConfirmPassword())) {
             return "Password do not match";
         }
 
-        if (personRepo.findByEmail(registrationRequest.getEmail()).isPresent()) {
+        if (personRepo.findByEmail(registrationDTO.getEmail()).isPresent()) {
             return "Email already exists";
         }
 
         Person person = Person.builder()
-                .firstName(registrationRequest.getFirstName())
-                .surname(registrationRequest.getSurname())
-                .email(registrationRequest.getEmail())
-                .password(passwordEncoder.encode(registrationRequest.getPassword()))
+                .firstName(registrationDTO.getFirstName())
+                .surname(registrationDTO.getSurname())
+                .email(registrationDTO.getEmail())
+                .password(passwordEncoder.encode(registrationDTO.getPassword()))
                 .role(Role.USER)
                 .verified(false)
                 .build();
@@ -62,39 +62,86 @@ public class AuthServiceImpl implements AuthService {
         // Send email
         emailService.sendOtpCode(person.getEmail(), otp);
 
-        return "Registration successful. OTP sent to your email for verification.";
+        // Build link for testing
+        String verificationLink = "http://localhost:8080/api/auth/verify?email="
+                + person.getEmail() + "&otp=" + otp;
+
+        return "Registration successful. OTP sent to your email for verification." +
+                "\nVerification Link (for testing): " + verificationLink;
     }
 
     @Override
-    public String loginPerson(LoginRequest loginRequest) {
-        Optional<Person> userOpt = personRepo.findByEmail(loginRequest.getEmail());
+    public String loginPerson(LoginDTO loginDTO) {
+        Optional<Person> userOpt = personRepo.findByEmail(loginDTO.getEmail());
 
         if (userOpt.isEmpty())
             return "Invalid credentials";
 
         Person person = userOpt.get();
-        if (!passwordEncoder.matches(loginRequest.getPassword(), person.getPassword())) {
+        if (!passwordEncoder.matches(loginDTO.getPassword(), person.getPassword())) {
             return "Invalid credentials";
         }
 
-        // Generate 6-digit code
+        //Check if email is not verified
+        if (!person.isVerified()) {
+            //Fetch or regenerate the email verification OTP
+            String otp = generateAndSaveEmailVerificationToken(person);
+
+            //Resend email verification link
+            emailService.sendOtpCode(person.getEmail(), otp);
+
+            //Return response with verification link
+            return "Email not verified. Please verify your email before logging in.\n\n"
+                    + "A new OTP has been sent to your email.\n"
+                    + "Click to verify: http://localhost:8080/api/auth/verify-email?email="
+                    + person.getEmail() + "&otp=" + otp;
+        }
+
+        // Generate and save OTP for login
+        String otp = generateAndSaveLoginOtp(person);
+        emailService.sendLoginToken(person.getEmail(), otp);
+
+        // Build link for testing
+        String verificationLink = "http://localhost:8080/api/auth/verify-login?email="
+                + person.getEmail() + "&otp=" + otp;
+
+        return "A login code has been sent to your email." +
+                "\nLogin Verification Link (for testing): " + verificationLink;
+    }
+
+    private String generateAndSaveLoginOtp(Person person) {
         String otp = String.valueOf(new Random().nextInt(900000) + 100000);
 
-        // Save OTP with expiry
         OtpCode otpCode = new OtpCode();
         otpCode.setCode(otp);
         otpCode.setExpiry(LocalDateTime.now().plusMinutes(5));
         otpCode.setPerson(person);
+
         otpCodeRepo.save(otpCode);
-
-        // Send OTP
-        emailService.sendLoginToken(person.getEmail(), otp);
-
-        return "A login code has been sent to your email.";
+        return otp;
     }
 
+    private String generateAndSaveEmailVerificationToken (Person person) {
+        String otp = String.valueOf(new Random().nextInt(900000) + 100000);
+
+        Optional<EmailVerificationToken> existingToken = emailVerificationTokenRepo
+                .findByPersonEmail(person.getEmail());
+        EmailVerificationToken token = existingToken.orElse(new EmailVerificationToken());
+        token.setPerson(person);
+        token.setOtpCode(otp);
+        token.setExpiryDate(LocalDateTime.now().plusMinutes(60));
+
+        emailVerificationTokenRepo.save(token);
+
+        return otp;
+    }
+
+
+
     @Override
-    public String verifyOtpCode(OtpVerifyRequest request) {
+    public String verifyOtpCode(LoginOtpVerifyDTO request) {
+        //otp code for login verification
+
         Optional<OtpCode> otpCodeOpt = otpCodeRepo.findByPerson_Email(request.getEmail());
 
         if (otpCodeOpt.isEmpty())
@@ -121,43 +168,53 @@ public class AuthServiceImpl implements AuthService {
 
     @Override
     public String verifyOtp(String email, String otpCode) {
+        //otp code for email verification
+        System.out.println("Verifying OTP for email: " + email + ", OTP: " + otpCode);
+
         Optional<EmailVerificationToken> optionalToken = emailVerificationTokenRepo
                 .findByPersonEmail(email);
 
-        if (optionalToken.isEmpty()) return "No OTP found for this email";
+        if (optionalToken.isEmpty())
+            return "No OTP found for this email";
 
         EmailVerificationToken token = optionalToken.get();
-        if (!token.getOtpCode().equals(otpCode))
+
+        if (token.getOtpCode() == null || token.getExpiryDate() == null)
+            return "Invalid OTP data";
+
+        if (!token.getOtpCode().trim().equals(otpCode.trim()))
             return "Invalid OTP";
 
         if (token.getExpiryDate().isBefore(LocalDateTime.now()))
             return "OTP expired";
 
-        // Delete token to mark as verified
+        // Mark user as verified
+        Person person = token.getPerson();
+        person.setVerified(true);
+        personRepo.save(person);
+
+        // Delete the token to prevent reuse
         emailVerificationTokenRepo.delete(token);
+
         return "Email verified successfully!";
     }
 
     @Override
-    public String forgotPassword(ForgotPasswordRequestDTO requestDTO) {
+    public String forgotPassword(ForgotPasswordDTO requestDTO) {
         Optional<Person> personOpt = personRepo.findByEmail(requestDTO.getEmail());
 
         if (personOpt.isEmpty())
             return "User with email not found";
 
         Person person = personOpt.get();
-        String otp = String.valueOf(new Random().nextInt(900000) + 100000);
 
-        Optional<EmailVerificationToken> existingToken = emailVerificationTokenRepo
-                .findByPersonEmail(requestDTO.getEmail());
-        EmailVerificationToken token = existingToken.orElse(new EmailVerificationToken());
-        token.setPerson(person);
-        token.setOtpCode(otp);
-        token.setExpiryDate(LocalDateTime.now().plusMinutes(10));
-        emailVerificationTokenRepo.save(token);
+        // Generate or update OTP for password reset
+        String otp = generateAndSaveEmailVerificationToken(person);
+        emailService.resetPasswordEmail(person.getEmail(), otp);
 
-        emailService.sendOtpCode(person.getEmail(), otp);
-        return "Reset OTP sent to your email.";
+        return "Reset OTP sent to your email.\n"
+                + "Click to verify: http://localhost:8080/api/auth/verify-email?email="
+                + person.getEmail() + "&otp=" + otp;
     }
 
     @Override
@@ -168,12 +225,16 @@ public class AuthServiceImpl implements AuthService {
 
         Optional<EmailVerificationToken> tokenOpt = emailVerificationTokenRepo
                 .findByOtpCode(resetDTO.getOtpCode());
-        if (tokenOpt.isEmpty()) return "Invalid OTP";
+        if (tokenOpt.isEmpty())
+            return "Invalid OTP";
 
         EmailVerificationToken token = tokenOpt.get();
 
-        if (!token.getPerson().getEmail().equals(resetDTO.getEmail())) return "Email mismatch";
-        if (token.getExpiryDate().isBefore(LocalDateTime.now())) return "OTP has expired";
+        if (!token.getPerson().getEmail().equals(resetDTO.getEmail()))
+            return "Email mismatch";
+
+        if (token.getExpiryDate().isBefore(LocalDateTime.now()))
+            return "OTP has expired";
 
         Person person = token.getPerson();
         person.setPassword(passwordEncoder.encode(resetDTO.getNewPassword()));

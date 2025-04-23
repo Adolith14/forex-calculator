@@ -3,7 +3,6 @@ package com.teamwork.forexcalculator.user.dto;
 import lombok.Data;
 
 @Data
-public class LoginRequest {
+public class ForgotPasswordDTO {
     private String email;
-    private String password;
 }

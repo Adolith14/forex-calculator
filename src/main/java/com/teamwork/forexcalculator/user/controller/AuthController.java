@@ -19,27 +19,29 @@ public class AuthController {
     }
 
     @PostMapping("/register")
-    public ResponseEntity<String> register(@RequestBody RegistrationRequest request) {
+    public ResponseEntity<String> register(@RequestBody RegistrationDTO request) {
         return ResponseEntity.ok(authService.registerUser(request));
     }
 
     @PostMapping("/login")
-    public ResponseEntity<String> login(@RequestBody LoginRequest request) {
+    public ResponseEntity<String> login(@RequestBody LoginDTO request) {
         return ResponseEntity.ok(authService.loginPerson(request));
     }
 
+    //login otp verification
     @PostMapping("/verify-otp")
-    public ResponseEntity<String> verifyOtp(@RequestBody OtpVerifyRequest request) {
+    public ResponseEntity<String> verifyOtp(@RequestBody LoginOtpVerifyDTO request) {
         return ResponseEntity.ok(authService.verifyOtpCode(request));
     }
 
+    //email otp verification
     @PostMapping("/verify-email")
-    public ResponseEntity<String> verifyEmail(@RequestBody OtpVerifyDto dto) {
+    public ResponseEntity<String> verifyEmail(@RequestBody EmailVerifyDTO dto) {
         return ResponseEntity.ok(authService.verifyOtp(dto.getEmail(), dto.getOtpCode()));
     }
 
     @PostMapping("/forgot-password")
-    public ResponseEntity<String> forgotPassword(@RequestBody ForgotPasswordRequestDTO requestDTO) {
+    public ResponseEntity<String> forgotPassword(@RequestBody ForgotPasswordDTO requestDTO) {
         return ResponseEntity.ok(authService.forgotPassword(requestDTO));
     }
 
