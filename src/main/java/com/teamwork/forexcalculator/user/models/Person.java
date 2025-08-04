@@ -21,11 +21,24 @@ public class Person {
     private String firstName;
     private String surname;
     private String email;
+    private String phoneNumber;
     private String password;
 
     @Column(nullable = false)
     private boolean verified = false;
 
+    @Column(nullable = false)
+    private boolean emailVerified = false;
+
+    @Column(nullable = false)
+    private boolean phoneNumberVerified = false;
+
     @Enumerated(EnumType.STRING)
     private Role role = Role.USER;
+
+    @Column(columnDefinition = "TEXT")
+    private String avatarUrl;
+
+    private boolean darkModeEnabled;
+
 }

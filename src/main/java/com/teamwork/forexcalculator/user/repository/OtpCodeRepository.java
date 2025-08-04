@@ -8,5 +8,6 @@ import java.util.Optional;
 
 @Repository
 public interface OtpCodeRepository extends JpaRepository<OtpCode, Long> {
+
     Optional<OtpCode> findByPerson_Email(String email);
 }

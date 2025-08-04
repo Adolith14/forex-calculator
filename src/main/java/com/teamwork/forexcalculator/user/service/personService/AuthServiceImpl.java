@@ -1,23 +1,29 @@
 package com.teamwork.forexcalculator.user.service.personService;
 
 import com.teamwork.forexcalculator.user.dto.*;
-import com.teamwork.forexcalculator.user.models.EmailVerificationToken;
-import com.teamwork.forexcalculator.user.models.OtpCode;
-import com.teamwork.forexcalculator.user.models.Person;
-import com.teamwork.forexcalculator.user.models.Role;
-import com.teamwork.forexcalculator.user.repository.EmailVerificationTokenRepository;
-import com.teamwork.forexcalculator.user.repository.OtpCodeRepository;
-import com.teamwork.forexcalculator.user.repository.PersonRepo;
+import com.teamwork.forexcalculator.user.exceptionHandling.*;
+import com.teamwork.forexcalculator.user.models.*;
+import com.teamwork.forexcalculator.user.repository.*;
 import com.teamwork.forexcalculator.user.securities.jwt.JwtUtil;
 import com.teamwork.forexcalculator.user.service.emailService.EmailService;
-
 import lombok.RequiredArgsConstructor;
+import org.springframework.core.io.Resource;
+import org.springframework.core.io.UrlResource;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.ResponseEntity;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
+import org.springframework.web.multipart.MultipartFile;
 
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.nio.file.StandardCopyOption;
 import java.time.LocalDateTime;
 import java.util.Optional;
 import java.util.Random;
+import java.util.UUID;
 
 @Service
 @RequiredArgsConstructor
@@ -28,139 +34,100 @@ public class AuthServiceImpl implements AuthService {
     private final JwtUtil jwtUtil;
     private final OtpCodeRepository otpCodeRepo;
     private final EmailVerificationTokenRepository emailVerificationTokenRepo;
+    private final PhoneVerificationRepository phoneVerificationRepo;
+
+    private static final int OTP_EXPIRY_MINUTES = 15;
+    private static final int LOGIN_OTP_EXPIRY_MINUTES = 5;
 
     @Override
     public String registerUser(RegistrationDTO registrationDTO) {
+        validateRegistration(registrationDTO);
+
+        Person person = buildPersonFromRegistration(registrationDTO);
+        personRepo.save(person);
+
+        String otp = generateOtp();
+        saveVerificationTokens(person, otp);
+        sendOtpToAvailableChannels(person, otp, true);
+
+        return "Registration successful. Verification codes sent to your email and phone number.";
+    }
+
+    private void validateRegistration(RegistrationDTO registrationDTO) {
         if (!registrationDTO.getPassword().equals(registrationDTO.getConfirmPassword())) {
-            return "Password do not match";
+            throw new PasswordMismatchException("Passwords do not match");
         }
 
         if (personRepo.findByEmail(registrationDTO.getEmail()).isPresent()) {
-            return "Email already exists";
+            throw new DuplicateEmailException("Email already exists");
         }
 
-        Person person = Person.builder()
+        if (personRepo.findByPhoneNumber(registrationDTO.getPhoneNumber()).isPresent()) {
+            throw new DuplicatePhoneException("Phone number already exists");
+        }
+
+        if (isStrongPassword(registrationDTO.getPassword())) {
+            throw new WeakPasswordException(
+                    "Password must contain at least one uppercase letter, " +
+                            "one lowercase letter, one digit, and one special character"
+            );
+        }
+    }
+
+    private Person buildPersonFromRegistration(RegistrationDTO registrationDTO) {
+        return Person.builder()
                 .firstName(registrationDTO.getFirstName())
                 .surname(registrationDTO.getSurname())
                 .email(registrationDTO.getEmail())
+                .phoneNumber(registrationDTO.getPhoneNumber())
                 .password(passwordEncoder.encode(registrationDTO.getPassword()))
                 .role(Role.USER)
                 .verified(false)
+                .emailVerified(false)
+                .phoneNumberVerified(false)
+                .darkModeEnabled(false)
                 .build();
-
-        personRepo.save(person);
-
-        // Generate OTP and save token
-        String otp = String.valueOf(new Random().nextInt(900000) + 100000);
-
-        EmailVerificationToken token = new EmailVerificationToken();
-        token.setOtpCode(otp);
-        token.setPerson(person);
-        token.setExpiryDate(LocalDateTime.now().plusMinutes(15));
-        emailVerificationTokenRepo.save(token);
-
-        // Send email
-        emailService.sendOtpCode(person.getEmail(), otp);
-
-        // Build link for testing
-        String verificationLink = "http://localhost:8080/api/auth/verify?email="
-                + person.getEmail() + "&otp=" + otp;
-
-        return "Registration successful. OTP sent to your email for verification." +
-                "\nVerification Link (for testing): " + verificationLink;
     }
 
     @Override
     public String loginPerson(LoginDTO loginDTO) {
-        Optional<Person> userOpt = personRepo.findByEmail(loginDTO.getEmail());
+        Person person = authenticateUser(loginDTO);
 
-        if (userOpt.isEmpty())
-            return "Invalid credentials";
-
-        Person person = userOpt.get();
-        if (!passwordEncoder.matches(loginDTO.getPassword(), person.getPassword())) {
-            return "Invalid credentials";
-        }
-
-        //Check if email is not verified
         if (!person.isVerified()) {
-            //Fetch or regenerate the email verification OTP
-            String otp = generateAndSaveEmailVerificationToken(person);
-
-            //Resend email verification link
-            emailService.sendOtpCode(person.getEmail(), otp);
-
-            //Return response with verification link
-            return "Email not verified. Please verify your email before logging in.\n\n"
-                    + "A new OTP has been sent to your email.\n"
-                    + "Click to verify: http://localhost:8080/api/auth/verify-email?email="
-                    + person.getEmail() + "&otp=" + otp;
+            String otp = generateOtp();
+            saveVerificationTokens(person, otp);
+            sendOtpToAvailableChannels(person, otp, true);
+            throw new AccountNotVerifiedException("Account not verified. Verification code sent.");
         }
 
-        // Generate and save OTP for login
-        String otp = generateAndSaveLoginOtp(person);
-        emailService.sendLoginToken(person.getEmail(), otp);
+        String loginOtp = generateAndSaveLoginOtp(person);
+        sendOtpToAvailableChannels(person, loginOtp, false);
 
-        // Build link for testing
-        String verificationLink = "http://localhost:8080/api/auth/verify-login?email="
-                + person.getEmail() + "&otp=" + otp;
-
-        return "A login code has been sent to your email." +
-                "\nLogin Verification Link (for testing): " + verificationLink;
+        return "Login code has been sent to your registered email/phone.";
     }
 
-    private String generateAndSaveLoginOtp(Person person) {
-        String otp = String.valueOf(new Random().nextInt(900000) + 100000);
+    private Person authenticateUser(LoginDTO loginDTO) {
+        String identifier = loginDTO.getEmailOrPhoneNumber();
+        Optional<Person> userOpt = isEmail(identifier)
+                ? personRepo.findByEmail(identifier)
+                : personRepo.findByPhoneNumber(identifier);
 
-        OtpCode otpCode = new OtpCode();
-        otpCode.setCode(otp);
-        otpCode.setExpiry(LocalDateTime.now().plusMinutes(5));
-        otpCode.setPerson(person);
+        Person person = userOpt.orElseThrow(() ->
+                new InvalidCredentialsException("Invalid credentials"));
 
-        otpCodeRepo.save(otpCode);
-        return otp;
+        if (!passwordEncoder.matches(loginDTO.getPassword(), person.getPassword())) {
+            throw new InvalidCredentialsException("Invalid credentials");
+        }
+
+        return person;
     }
-
-    private String generateAndSaveEmailVerificationToken (Person person) {
-        String otp = String.valueOf(new Random().nextInt(900000) + 100000);
-
-        Optional<EmailVerificationToken> existingToken = emailVerificationTokenRepo
-                .findByPersonEmail(person.getEmail());
-        EmailVerificationToken token = existingToken.orElse(new EmailVerificationToken());
-        token.setPerson(person);
-        token.setOtpCode(otp);
-        token.setExpiryDate(LocalDateTime.now().plusMinutes(60));
-
-        emailVerificationTokenRepo.save(token);
-
-        return otp;
-    }
-
-
 
     @Override
     public String verifyOtpCode(LoginOtpVerifyDTO request) {
-        //otp code for login verification
+        OtpCode otp = otpCodeRepo.findByPerson_Email(request.getEmail())
+                .orElseThrow(() -> new InvalidOtpException("Invalid code"));
 
-        Optional<OtpCode> otpCodeOpt = otpCodeRepo.findByPerson_Email(request.getEmail());
-
-        if (otpCodeOpt.isEmpty())
-            return "Invalid code";
-
-        OtpCode otp = otpCodeOpt.get();
-
-        if (!otp.getCode().equals(request.getCode())) {
-            return "Incorrect code";
-        }
-
-        if (otp.getExpiry().isBefore(LocalDateTime.now())) {
-            return "Code expired";
-        }
-
-        // OTP is valid -> generate token
         String token = jwtUtil.generateToken(request.getEmail());
-
-        // Optionally delete OTP
         otpCodeRepo.delete(otp);
 
         return token;
@@ -168,73 +135,81 @@ public class AuthServiceImpl implements AuthService {
 
     @Override
     public String verifyOtp(String email, String otpCode) {
-        //otp code for email verification
-        System.out.println("Verifying OTP for email: " + email + ", OTP: " + otpCode);
+        EmailVerificationToken token = emailVerificationTokenRepo.findByPersonEmail(email)
+                .orElseThrow(() -> new InvalidOtpException("No OTP found for this email"));
 
-        Optional<EmailVerificationToken> optionalToken = emailVerificationTokenRepo
-                .findByPersonEmail(email);
+        validateOtpToken(token, otpCode);
 
-        if (optionalToken.isEmpty())
-            return "No OTP found for this email";
-
-        EmailVerificationToken token = optionalToken.get();
-
-        if (token.getOtpCode() == null || token.getExpiryDate() == null)
-            return "Invalid OTP data";
-
-        if (!token.getOtpCode().trim().equals(otpCode.trim()))
-            return "Invalid OTP";
-
-        if (token.getExpiryDate().isBefore(LocalDateTime.now()))
-            return "OTP expired";
-
-        // Mark user as verified
         Person person = token.getPerson();
         person.setVerified(true);
+        person.setEmailVerified(true);
         personRepo.save(person);
 
-        // Delete the token to prevent reuse
         emailVerificationTokenRepo.delete(token);
-
         return "Email verified successfully!";
     }
 
     @Override
+    public String verifyPhoneNumber(String phoneNumber, String phoneOtp) {
+        PhoneNumberVerificationOtp otp = phoneVerificationRepo.findByPhoneNumber(phoneNumber)
+                .orElseThrow(() -> new InvalidOtpException("No OTP found for this phone number"));
+
+        validatePhoneOtp(otp, phoneOtp);
+
+        Person person = otp.getPerson();
+        person.setVerified(true);
+        person.setPhoneNumberVerified(true);
+        personRepo.save(person);
+
+        phoneVerificationRepo.delete(otp);
+        return "Phone number verified successfully!";
+    }
+
+    private void validateOtpToken(EmailVerificationToken token, String otpCode) {
+        if (token.getOtpCode() == null || token.getExpiryDate() == null) {
+            throw new InvalidOtpException("Invalid OTP data");
+        }
+        if (!token.getOtpCode().trim().equals(otpCode.trim())) {
+            throw new InvalidOtpException("Invalid OTP");
+        }
+        if (token.getExpiryDate().isBefore(LocalDateTime.now())) {
+            throw new ExpiredOtpException("OTP expired");
+        }
+    }
+
+    private void validatePhoneOtp(PhoneNumberVerificationOtp otp, String phoneOtp) {
+        if (otp.getPhoneOtp() == null || otp.getExpiryDate() == null) {
+            throw new InvalidOtpException("Invalid OTP data");
+        }
+        if (!otp.getPhoneOtp().trim().equals(phoneOtp.trim())) {
+            throw new InvalidOtpException("Invalid OTP");
+        }
+        if (otp.getExpiryDate().isBefore(LocalDateTime.now())) {
+            throw new ExpiredOtpException("OTP expired");
+        }
+    }
+
+    @Override
     public String forgotPassword(ForgotPasswordDTO requestDTO) {
-        Optional<Person> personOpt = personRepo.findByEmail(requestDTO.getEmail());
+        Person person = personRepo.findByEmail(requestDTO.getEmail())
+                .orElseThrow(() -> new UserNotFoundException("User with email not found"));
 
-        if (personOpt.isEmpty())
-            return "User with email not found";
-
-        Person person = personOpt.get();
-
-        // Generate or update OTP for password reset
         String otp = generateAndSaveEmailVerificationToken(person);
         emailService.resetPasswordEmail(person.getEmail(), otp);
 
-        return "Reset OTP sent to your email.\n"
-                + "Click to verify: http://localhost:8080/api/auth/verify-email?email="
-                + person.getEmail() + "&otp=" + otp;
+        return "Reset OTP sent to your email.";
     }
 
     @Override
     public String resetPassword(ResetPasswordDTO resetDTO) {
         if (!resetDTO.getNewPassword().equals(resetDTO.getConfirmPassword())) {
-            return "Passwords do not match";
+            throw new PasswordMismatchException("Passwords do not match");
         }
 
-        Optional<EmailVerificationToken> tokenOpt = emailVerificationTokenRepo
-                .findByOtpCode(resetDTO.getOtpCode());
-        if (tokenOpt.isEmpty())
-            return "Invalid OTP";
+        EmailVerificationToken token = emailVerificationTokenRepo.findByOtpCode(resetDTO.getOtpCode())
+                .orElseThrow(() -> new InvalidOtpException("Invalid OTP"));
 
-        EmailVerificationToken token = tokenOpt.get();
-
-        if (!token.getPerson().getEmail().equals(resetDTO.getEmail()))
-            return "Email mismatch";
-
-        if (token.getExpiryDate().isBefore(LocalDateTime.now()))
-            return "OTP has expired";
+        validatePasswordReset(token, resetDTO);
 
         Person person = token.getPerson();
         person.setPassword(passwordEncoder.encode(resetDTO.getNewPassword()));
@@ -242,5 +217,189 @@ public class AuthServiceImpl implements AuthService {
         emailVerificationTokenRepo.delete(token);
 
         return "Password reset successfully.";
+    }
+
+    private void validatePasswordReset(EmailVerificationToken token, ResetPasswordDTO resetDTO) {
+        if (!token.getPerson().getEmail().equals(resetDTO.getEmail())) {
+            throw new InvalidOtpException("Email mismatch");
+        }
+        if (token.getExpiryDate().isBefore(LocalDateTime.now())) {
+            throw new ExpiredOtpException("OTP has expired");
+        }
+        if (isStrongPassword(resetDTO.getNewPassword())) {
+            throw new WeakPasswordException(
+                    "New password must contain at least one uppercase letter, " +
+                            "one lowercase letter, one digit, and one special character"
+            );
+        }
+    }
+
+    @Override
+    public String updateProfile(UpdateProfileDTO dto, String email) {
+        Person person = personRepo.findByEmail(email)
+                .orElseThrow(() -> new UserNotFoundException("User not found"));
+
+        person.setFirstName(dto.getFirstName());
+        person.setSurname(dto.getSurname());
+        person.setPhoneNumber(dto.getPhoneNumber());
+        person.setDarkModeEnabled(dto.getDarkModeEnabled());
+
+        personRepo.save(person);
+        return "Profile updated successfully.";
+    }
+
+    @Override
+    public String uploadAvatar(String email, MultipartFile file) {
+        if (file.isEmpty()) {
+            throw new FileUploadException("File cannot be empty");
+        }
+
+        Person person = personRepo.findByEmail(email)
+                .orElseThrow(() -> new UserNotFoundException("User not found"));
+
+        try {
+            String filename = UUID.randomUUID() + "_" + file.getOriginalFilename();
+            Path path = Paths.get("src/main/resources/uploads/" + filename);
+            Files.copy(file.getInputStream(), path, StandardCopyOption.REPLACE_EXISTING);
+
+            person.setAvatarUrl(filename);
+            personRepo.save(person);
+            return "Avatar uploaded successfully.";
+        } catch (IOException e) {
+            throw new FileUploadException("Failed to upload avatar: " + e.getMessage());
+        }
+    }
+
+    @Override
+    public String changePassword(String email, ChangePasswordDTO dto) {
+        Person person = personRepo.findByEmail(email)
+                .orElseThrow(() -> new UserNotFoundException("User not found"));
+
+        validatePasswordChange(person, dto);
+
+        person.setPassword(passwordEncoder.encode(dto.getNewPassword()));
+        personRepo.save(person);
+
+        return "Password changed successfully.";
+    }
+
+    private void validatePasswordChange(Person person, ChangePasswordDTO dto) {
+        if (!passwordEncoder.matches(dto.getOldPassword(), person.getPassword())) {
+            throw new InvalidPasswordException("Current password is incorrect");
+        }
+        if (!dto.getNewPassword().equals(dto.getConfirmPassword())) {
+            throw new PasswordMismatchException("New password and confirm password do not match");
+        }
+        if (isStrongPassword(dto.getNewPassword())) {
+            throw new WeakPasswordException(
+                    "New password must contain at least one uppercase letter, " +
+                            "one lowercase letter, one digit, and one special character"
+            );
+        }
+    }
+
+    @Override
+    public ResponseEntity<Resource> getAvatarFile(String email) throws IOException {
+        Person person = personRepo.findByEmail(email)
+                .orElseThrow(() -> new UserNotFoundException("User not found"));
+
+        if (person.getAvatarUrl() == null) {
+            throw new FileUploadException("Avatar not found");
+        }
+
+        Path path = Paths.get("src/main/resources/uploads/" + person.getAvatarUrl());
+        Resource resource = new UrlResource(path.toUri());
+
+        if (!resource.exists() || !resource.isReadable()) {
+            throw new FileUploadException("Could not read avatar file");
+        }
+
+        return ResponseEntity.ok()
+                .header(HttpHeaders.CONTENT_TYPE, Files.probeContentType(path))
+                .body(resource);
+    }
+
+    @Override
+    public ProfileResponseDTO getProfile(String email) {
+        Person person = personRepo.findByEmail(email)
+                .orElseThrow(() -> new UserNotFoundException("User not found"));
+
+        return ProfileResponseDTO.builder()
+                .firstName(person.getFirstName())
+                .surname(person.getSurname())
+                .email(person.getEmail())
+                .phoneNumber(person.getPhoneNumber())
+                .avatarUrl(person.getAvatarUrl() != null ?
+                        "/api/auth/user/profile/avatar-image" : null)
+                .darkModeEnabled(person.isDarkModeEnabled())
+                .build();
+    }
+
+    // --------------------
+    // Internal helper methods
+    // --------------------
+
+    private String generateOtp() {
+        return String.valueOf(new Random().nextInt(900000) + 100000);
+    }
+
+    private void saveVerificationTokens(Person person, String otp) {
+        if (person.getEmail() != null) {
+            EmailVerificationToken emailToken = new EmailVerificationToken();
+            emailToken.setOtpCode(otp);
+            emailToken.setPerson(person);
+            emailToken.setExpiryDate(LocalDateTime.now().plusMinutes(OTP_EXPIRY_MINUTES));
+            emailVerificationTokenRepo.save(emailToken);
+        }
+
+        if (person.getPhoneNumber() != null) {
+            PhoneNumberVerificationOtp phoneToken = new PhoneNumberVerificationOtp();
+            phoneToken.setPhoneOtp(otp);
+            phoneToken.setPerson(person);
+            phoneToken.setExpiryDate(LocalDateTime.now().plusMinutes(OTP_EXPIRY_MINUTES));
+            phoneVerificationRepo.save(phoneToken);
+        }
+    }
+
+    private String generateAndSaveLoginOtp(Person person) {
+        String otp = generateOtp();
+        OtpCode code = new OtpCode();
+        code.setCode(otp);
+        code.setPerson(person);
+        code.setExpiry(LocalDateTime.now().plusMinutes(LOGIN_OTP_EXPIRY_MINUTES));
+        otpCodeRepo.save(code);
+        return otp;
+    }
+
+    private String generateAndSaveEmailVerificationToken(Person person) {
+        String otp = generateOtp();
+        Optional<EmailVerificationToken> existing = emailVerificationTokenRepo.findByPersonEmail(person.getEmail());
+        EmailVerificationToken token = existing.orElse(new EmailVerificationToken());
+        token.setPerson(person);
+        token.setOtpCode(otp);
+        token.setExpiryDate(LocalDateTime.now().plusMinutes(OTP_EXPIRY_MINUTES));
+        emailVerificationTokenRepo.save(token);
+        return otp;
+    }
+
+    private void sendOtpToAvailableChannels(Person person, String otp, boolean isVerification) {
+        if (person.getEmail() != null) {
+            if (isVerification) emailService.sendOtpCode(person.getEmail(), otp);
+            else emailService.sendLoginToken(person.getEmail(), otp);
+        }
+        // Uncomment when SMS service is available
+        /*if (person.getPhoneNumber() != null) {
+            if (isVerification) smsService.sendOtpCode(person.getPhoneNumber(), otp);
+            else smsService.sendLoginToken(person.getPhoneNumber(), otp);
+        }*/
+    }
+
+    private boolean isEmail(String identifier) {
+        return identifier != null && identifier.contains("@");
+    }
+
+    private boolean isStrongPassword(String password) {
+        String pattern = "^(?=.*[a-z])(?=.*[A-Z])(?=.*\\d)(?=.*[@$!%*?&])[A-Za-z\\d@$!%*?&]{8,}$";
+        return password == null && !password.matches(pattern);
     }
 }
