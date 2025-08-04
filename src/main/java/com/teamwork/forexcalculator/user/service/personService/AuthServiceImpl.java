@@ -1,11 +1,14 @@
 package com.teamwork.forexcalculator.user.service.personService;
 
 import com.teamwork.forexcalculator.user.dto.*;
+import com.teamwork.forexcalculator.user.dto.smsHandling.SmsRequestDTO;
+import com.teamwork.forexcalculator.user.dto.smsHandling.SmsResponseDTO;
 import com.teamwork.forexcalculator.user.exceptionHandling.*;
 import com.teamwork.forexcalculator.user.models.*;
 import com.teamwork.forexcalculator.user.repository.*;
 import com.teamwork.forexcalculator.user.securities.jwt.JwtUtil;
 import com.teamwork.forexcalculator.user.service.emailService.EmailService;
+import com.teamwork.forexcalculator.user.service.smsService.SmsService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.core.io.Resource;
 import org.springframework.core.io.UrlResource;
@@ -24,6 +27,8 @@ import java.time.LocalDateTime;
 import java.util.Optional;
 import java.util.Random;
 import java.util.UUID;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 @Service
 @RequiredArgsConstructor
@@ -35,6 +40,7 @@ public class AuthServiceImpl implements AuthService {
     private final OtpCodeRepository otpCodeRepo;
     private final EmailVerificationTokenRepository emailVerificationTokenRepo;
     private final PhoneVerificationRepository phoneVerificationRepo;
+    private final SmsService smsService;
 
     private static final int OTP_EXPIRY_MINUTES = 15;
     private static final int LOGIN_OTP_EXPIRY_MINUTES = 5;
@@ -162,19 +168,9 @@ public class AuthServiceImpl implements AuthService {
         personRepo.save(person);
 
         phoneVerificationRepo.delete(otp);
-        return "Phone number verified successfully!";
-    }
 
-    private void validateOtpToken(EmailVerificationToken token, String otpCode) {
-        if (token.getOtpCode() == null || token.getExpiryDate() == null) {
-            throw new InvalidOtpException("Invalid OTP data");
-        }
-        if (!token.getOtpCode().trim().equals(otpCode.trim())) {
-            throw new InvalidOtpException("Invalid OTP");
-        }
-        if (token.getExpiryDate().isBefore(LocalDateTime.now())) {
-            throw new ExpiredOtpException("OTP expired");
-        }
+        // Return response that matches gateway format
+        return "{\"error_code\":\"200\",\"description\":\"success\"}";
     }
 
     private void validatePhoneOtp(PhoneNumberVerificationOtp otp, String phoneOtp) {
@@ -187,6 +183,29 @@ public class AuthServiceImpl implements AuthService {
         if (otp.getExpiryDate().isBefore(LocalDateTime.now())) {
             throw new ExpiredOtpException("OTP expired");
         }
+    }
+
+    @Override
+    public SmsResponseDTO processSmsVerification(SmsRequestDTO request) {
+        if (request.getMessage().matches(".*\\b\\d{6}\\b.*")) {
+            String otp = extractOtp(request.getMessage());
+            try {
+                verifyPhoneNumber(request.getMsisdn(), otp);
+                return new SmsResponseDTO("200", "success");
+            } catch (Exception e) {
+                return new SmsResponseDTO("400", e.getMessage());
+            }
+        }
+        return new SmsResponseDTO("200", "Message received");
+    }
+
+    private String extractOtp(String message) {
+        Pattern pattern = Pattern.compile("\\b\\d{6}\\b");
+        Matcher matcher = pattern.matcher(message);
+        if (matcher.find()) {
+            return matcher.group();
+        }
+        throw new InvalidOtpException("No valid OTP found in message");
     }
 
     @Override
@@ -384,14 +403,16 @@ public class AuthServiceImpl implements AuthService {
 
     private void sendOtpToAvailableChannels(Person person, String otp, boolean isVerification) {
         if (person.getEmail() != null) {
-            if (isVerification) emailService.sendOtpCode(person.getEmail(), otp);
+            if (isVerification)
+                emailService.sendOtpCode(person.getEmail(), otp);
             else emailService.sendLoginToken(person.getEmail(), otp);
         }
         // Uncomment when SMS service is available
-        /*if (person.getPhoneNumber() != null) {
-            if (isVerification) smsService.sendOtpCode(person.getPhoneNumber(), otp);
+        if (person.getPhoneNumber() != null) {
+            if (isVerification)
+                smsService.sendOtpCode(person.getPhoneNumber(), otp);
             else smsService.sendLoginToken(person.getPhoneNumber(), otp);
-        }*/
+        }
     }
 
     private boolean isEmail(String identifier) {
@@ -402,4 +423,17 @@ public class AuthServiceImpl implements AuthService {
         String pattern = "^(?=.*[a-z])(?=.*[A-Z])(?=.*\\d)(?=.*[@$!%*?&])[A-Za-z\\d@$!%*?&]{8,}$";
         return password == null && !password.matches(pattern);
     }
+
+    private void validateOtpToken(EmailVerificationToken token, String otpCode) {
+        if (token.getOtpCode() == null || token.getExpiryDate() == null) {
+            throw new InvalidOtpException("Invalid OTP data");
+        }
+        if (!token.getOtpCode().equals(otpCode)) {
+            throw new InvalidOtpException("Invalid OTP code");
+        }
+        if (token.getExpiryDate().isBefore(LocalDateTime.now())) {
+            throw new ExpiredOtpException("OTP has expired");
+        }
+    }
+
 }

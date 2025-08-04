@@ -1,11 +1,14 @@
 package com.teamwork.forexcalculator.user.controller;
 
 import com.teamwork.forexcalculator.user.dto.*;
+import com.teamwork.forexcalculator.user.dto.smsHandling.SmsRequestDTO;
+import com.teamwork.forexcalculator.user.dto.smsHandling.SmsResponseDTO;
 import com.teamwork.forexcalculator.user.exceptionHandling.*;
 import com.teamwork.forexcalculator.user.repository.RefreshTokenRepository;
 import com.teamwork.forexcalculator.user.securities.jwt.JwtUtil;
 import com.teamwork.forexcalculator.user.service.personService.AuthService;
 import com.teamwork.forexcalculator.user.service.personService.TokenBlacklistService;
+import com.teamwork.forexcalculator.user.service.smsService.SmsService;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
@@ -26,6 +29,7 @@ public class AuthController {
     private final JwtUtil jwtUtil;
     private final TokenBlacklistService tokenBlacklistService;
     private final RefreshTokenRepository refreshTokenRepository;
+    private final SmsService smsService;
 
     @PostMapping("/register")
     public ResponseEntity<ApiResponse<String>> register(@Valid @RequestBody RegistrationDTO request) {
@@ -118,13 +122,33 @@ public class AuthController {
     }
 
     @PostMapping("/verify-phone")
-    public ResponseEntity<ApiResponse<String>> verifyPhone(@Valid @RequestBody PhoneVerifyDTO dto) {
-        try {
-            String response = authService.verifyPhoneNumber(dto.getPhoneNumber(), dto.getOtpCode());
-            return ResponseEntity.ok(new ApiResponse<>(true, response, null));
-        } catch (InvalidOtpException | ExpiredOtpException e) {
-            return ResponseEntity.badRequest().body(new ApiResponse<>(false, null, e.getMessage()));
+    public ResponseEntity<?> verifyPhone(@RequestBody Map<String, Object> request) {
+        // Check if this is an OTP verification request
+        if (request.containsKey("phoneNumber") && request.containsKey("otpCode")) {
+            PhoneVerifyDTO dto = new PhoneVerifyDTO();
+            dto.setPhoneNumber((String) request.get("phoneNumber"));
+            dto.setOtpCode((String) request.get("otpCode"));
+
+            try {
+                String response = authService.verifyPhoneNumber(dto.getPhoneNumber(), dto.getOtpCode());
+                return ResponseEntity.ok(new ApiResponse<>(true, response, null));
+            } catch (InvalidOtpException | ExpiredOtpException e) {
+                return ResponseEntity.badRequest().body(new ApiResponse<>(false, null, e.getMessage()));
+            }
         }
+        // Handle SMS gateway submission
+        else if (request.containsKey("msisdn")) {
+            SmsRequestDTO smsRequest = new SmsRequestDTO();
+            smsRequest.setMsisdn((String) request.get("msisdn"));
+            smsRequest.setMessage((String) request.get("message"));
+            // Set other fields...
+
+            SmsResponseDTO response = authService.processSmsVerification(smsRequest);
+            return ResponseEntity.ok(response);
+        }
+
+        return ResponseEntity.badRequest().body(
+                new ApiResponse<>(false, null, "Invalid request format"));
     }
 
     @PostMapping("/forgot-password")

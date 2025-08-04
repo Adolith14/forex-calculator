@@ -16,7 +16,7 @@ public class EmailServiceImpl implements EmailService {
     @Override
     public String sendLoginToken(String email, String token) {
         String messageText = "Hello,\n\n"
-                + "A login OTP has been generated for your account at Forex Calculator.\n\n"
+                + "A login OTP has been generated for your account.\n\n"
                 + "Please use the following OTP to complete your login:\n\n"
                 + "🔐 OTP: " + token + "\n\n"
                 + "This OTP is valid for 5 minutes.\n\n"
