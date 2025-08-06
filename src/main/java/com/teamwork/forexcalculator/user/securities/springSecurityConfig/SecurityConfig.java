@@ -72,14 +72,6 @@ public class SecurityConfig {
                             String accessToken = jwtUtil.generateToken(oauthUser.getPerson().getEmail());
                             String refreshToken = jwtUtil.generateRefreshToken(oauthUser.getPerson());
 
-                            // Save refresh token to database
-/*
-                            RefreshToken refreshTokenEntity = refreshTokenService.createRefreshToken(
-                                    oauthUser.getPerson().getId(),
-                                    refreshToken
-                            );
-*/
-
                             // Redirect with tokens
                             response.sendRedirect(appProperties.getOauth2SuccessRedirectUrl() +
                                     "?token=" + accessToken +

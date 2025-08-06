@@ -41,4 +41,7 @@ public class Person {
 
     private boolean darkModeEnabled;
 
+    @Column(name = "country_code", length = 2)
+    private String countryCode; // ISO 2-letter code (US, NG, etc.)
+
 }

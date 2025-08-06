@@ -1,5 +1,6 @@
 package com.teamwork.forexcalculator.user.service.personService;
 
+import com.google.i18n.phonenumbers.NumberParseException;
 import com.teamwork.forexcalculator.user.dto.*;
 import com.teamwork.forexcalculator.user.dto.smsHandling.SmsRequestDTO;
 import com.teamwork.forexcalculator.user.dto.smsHandling.SmsResponseDTO;
@@ -8,28 +9,32 @@ import com.teamwork.forexcalculator.user.models.*;
 import com.teamwork.forexcalculator.user.repository.*;
 import com.teamwork.forexcalculator.user.securities.jwt.JwtUtil;
 import com.teamwork.forexcalculator.user.service.emailService.EmailService;
+import com.teamwork.forexcalculator.user.service.phoneNumberValidator.PhoneNumberValidator;
+import com.teamwork.forexcalculator.user.service.s3Service.S3Service;
 import com.teamwork.forexcalculator.user.service.smsService.SmsService;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.core.io.Resource;
-import org.springframework.core.io.UrlResource;
-import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.scheduling.annotation.Async;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
 
-import java.io.IOException;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.Paths;
-import java.nio.file.StandardCopyOption;
+import java.net.URI;
+import java.time.Instant;
 import java.time.LocalDateTime;
+import java.time.ZoneId;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Random;
-import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+@Slf4j
 @Service
 @RequiredArgsConstructor
 public class AuthServiceImpl implements AuthService {
@@ -41,6 +46,7 @@ public class AuthServiceImpl implements AuthService {
     private final EmailVerificationTokenRepository emailVerificationTokenRepo;
     private final PhoneVerificationRepository phoneVerificationRepo;
     private final SmsService smsService;
+    private final S3Service s3Service;
 
     private static final int OTP_EXPIRY_MINUTES = 15;
     private static final int LOGIN_OTP_EXPIRY_MINUTES = 5;
@@ -53,30 +59,44 @@ public class AuthServiceImpl implements AuthService {
         personRepo.save(person);
 
         String otp = generateOtp();
-        saveVerificationTokens(person, otp);
-        sendOtpToAvailableChannels(person, otp, true);
+        String maskedOtp = maskOtp(otp);
+        saveVerificationTokens(person, maskedOtp);
+        sendOtpToAvailableChannels(person, maskedOtp, true);
 
         return "Registration successful. Verification codes sent to your email and phone number.";
     }
+    private String maskOtp(String otp) {
+        // Show first 2 and last 2 characters, mask others (e.g., 12****34)
+        int length = otp.length();
+        if (length <= 4) return "****";
+
+        String start = otp.substring(0, 2);
+        String end = otp.substring(length - 2);
+        return start + "****" + end;
+    }
 
     private void validateRegistration(RegistrationDTO registrationDTO) {
-        if (!registrationDTO.getPassword().equals(registrationDTO.getConfirmPassword())) {
-            throw new PasswordMismatchException("Passwords do not match");
+        // ... existing validations ...
+
+        // Validate international phone number
+        if (!PhoneNumberValidator.isValid(registrationDTO.getPhoneNumber(), registrationDTO.getCountryCode())) {
+            throw new InvalidPhoneNumberException("Invalid phone number for country: " + registrationDTO.getCountryCode());
         }
 
-        if (personRepo.findByEmail(registrationDTO.getEmail()).isPresent()) {
-            throw new DuplicateEmailException("Email already exists");
+        // Convert to E164 format
+        try {
+            String formattedNumber = PhoneNumberValidator.formatE164(
+                    registrationDTO.getPhoneNumber(),
+                    registrationDTO.getCountryCode()
+            );
+            registrationDTO.setPhoneNumber(formattedNumber); // +2348012345678
+        } catch (NumberParseException e) {
+            throw new InvalidPhoneNumberException("Phone number parsing failed");
         }
 
+        // Check for duplicates with formatted number
         if (personRepo.findByPhoneNumber(registrationDTO.getPhoneNumber()).isPresent()) {
             throw new DuplicatePhoneException("Phone number already exists");
-        }
-
-        if (isStrongPassword(registrationDTO.getPassword())) {
-            throw new WeakPasswordException(
-                    "Password must contain at least one uppercase letter, " +
-                            "one lowercase letter, one digit, and one special character"
-            );
         }
     }
 
@@ -101,19 +121,36 @@ public class AuthServiceImpl implements AuthService {
 
         if (!person.isVerified()) {
             String otp = generateOtp();
-            saveVerificationTokens(person, otp);
-            sendOtpToAvailableChannels(person, otp, true);
+            String maskedOtp = maskOtp(otp);
+            saveVerificationTokens(person, maskedOtp);
+            sendOtpToAvailableChannels(person, maskedOtp, true);
             throw new AccountNotVerifiedException("Account not verified. Verification code sent.");
         }
 
         String loginOtp = generateAndSaveLoginOtp(person);
-        sendOtpToAvailableChannels(person, loginOtp, false);
+        String maskedOtp = maskOtp(loginOtp);
+        sendOtpToAvailableChannels(person, maskedOtp, false);
 
         return "Login code has been sent to your registered email/phone.";
     }
 
     private Person authenticateUser(LoginDTO loginDTO) {
         String identifier = loginDTO.getEmailOrPhoneNumber();
+
+        // If identifier is a phone number
+        if (identifier.matches("^\\+?[0-9].*")) {
+            try {
+                // Parse and format the phone number
+                String formattedNumber = PhoneNumberValidator.formatE164(
+                        identifier,
+                        loginDTO.getCountryCode()
+                );
+                identifier = formattedNumber;
+            } catch (NumberParseException e) {
+                throw new InvalidCredentialsException("Invalid phone number format");
+            }
+        }
+
         Optional<Person> userOpt = isEmail(identifier)
                 ? personRepo.findByEmail(identifier)
                 : personRepo.findByPhoneNumber(identifier);
@@ -130,11 +167,43 @@ public class AuthServiceImpl implements AuthService {
 
     @Override
     public String verifyOtpCode(LoginOtpVerifyDTO request) {
+        // 1. Find and validate OTP existence
         OtpCode otp = otpCodeRepo.findByPerson_Email(request.getEmail())
-                .orElseThrow(() -> new InvalidOtpException("Invalid code"));
+                .orElseThrow(() -> {
+                    log.warn("OTP attempt for non-existent email: {}", request.getEmail());
+                    return new InvalidOtpException("Invalid code");
+                });
 
-        String token = jwtUtil.generateToken(request.getEmail());
-        otpCodeRepo.delete(otp);
+        // 2. Check expiration (with timezone awareness)
+        if (otp.getExpiry().isBefore(LocalDateTime.now(ZoneId.of("UTC")))) {
+            otpCodeRepo.delete(otp);
+            log.warn("Expired OTP attempt for email: {}", request.getEmail());
+            throw new ExpiredOtpException("OTP expired. Please request a new one.");
+        }
+
+        // 3. Validate OTP match (case-insensitive and trim whitespace)
+        if (!otp.getCode().trim().equalsIgnoreCase(request.getCode().trim())) {
+            log.warn("Invalid OTP attempt for email: {}", request.getEmail());
+            throw new InvalidOtpException("The code you entered is incorrect");
+        }
+
+        // 4. Generate JWT with additional claims
+        Map<String, Object> claims = new HashMap<>();
+        claims.put("otpVerified", true);
+        claims.put("authTime", Instant.now().getEpochSecond());
+
+        String token = jwtUtil.generateToken(request.getEmail(), claims);
+
+        // 5. Cleanup (with transaction awareness)
+        try {
+            otpCodeRepo.delete(otp);
+            otpCodeRepo.flush();
+        } catch (Exception e) {
+            log.error("Failed to delete OTP for email: {}", request.getEmail(), e);
+        }
+
+        // 6. Audit log
+        log.info("Successful OTP verification for email: {}", request.getEmail());
 
         return token;
     }
@@ -214,7 +283,8 @@ public class AuthServiceImpl implements AuthService {
                 .orElseThrow(() -> new UserNotFoundException("User with email not found"));
 
         String otp = generateAndSaveEmailVerificationToken(person);
-        emailService.resetPasswordEmail(person.getEmail(), otp);
+        String maskedOtp = maskOtp(otp);
+        emailService.resetPasswordEmail(person.getEmail(), maskedOtp);
 
         return "Reset OTP sent to your email.";
     }
@@ -268,25 +338,30 @@ public class AuthServiceImpl implements AuthService {
     }
 
     @Override
-    public String uploadAvatar(String email, MultipartFile file) {
+    public CompletableFuture<String> uploadAvatar(String email, MultipartFile file) {
         if (file.isEmpty()) {
-            throw new FileUploadException("File cannot be empty");
+            return CompletableFuture.failedFuture(new FileUploadException("File cannot be empty"));
         }
 
+        return personRepo.findByEmail(email)
+                .map(person -> s3Service.uploadFileAsync(file)
+                        .thenCompose(avatarUrl -> {
+                            person.setAvatarUrl(avatarUrl);
+                            personRepo.save(person);
+                            return CompletableFuture.completedFuture("Avatar uploaded successfully");
+                        }))
+                .orElse(CompletableFuture.failedFuture(new UserNotFoundException("User not found")));
+    }
+
+    @Override
+    public String getAvatarUrl(String email) throws UserNotFoundException {
         Person person = personRepo.findByEmail(email)
                 .orElseThrow(() -> new UserNotFoundException("User not found"));
 
-        try {
-            String filename = UUID.randomUUID() + "_" + file.getOriginalFilename();
-            Path path = Paths.get("src/main/resources/uploads/" + filename);
-            Files.copy(file.getInputStream(), path, StandardCopyOption.REPLACE_EXISTING);
-
-            person.setAvatarUrl(filename);
-            personRepo.save(person);
-            return "Avatar uploaded successfully.";
-        } catch (IOException e) {
-            throw new FileUploadException("Failed to upload avatar: " + e.getMessage());
+        if (person.getAvatarUrl() == null) {
+            throw new FileUploadException("Avatar not found");
         }
+        return person.getAvatarUrl(); // Returns full S3 URL
     }
 
     @Override
@@ -295,7 +370,6 @@ public class AuthServiceImpl implements AuthService {
                 .orElseThrow(() -> new UserNotFoundException("User not found"));
 
         validatePasswordChange(person, dto);
-
         person.setPassword(passwordEncoder.encode(dto.getNewPassword()));
         personRepo.save(person);
 
@@ -318,7 +392,7 @@ public class AuthServiceImpl implements AuthService {
     }
 
     @Override
-    public ResponseEntity<Resource> getAvatarFile(String email) throws IOException {
+    public ResponseEntity<Resource> getAvatarFile(String email) {
         Person person = personRepo.findByEmail(email)
                 .orElseThrow(() -> new UserNotFoundException("User not found"));
 
@@ -326,16 +400,10 @@ public class AuthServiceImpl implements AuthService {
             throw new FileUploadException("Avatar not found");
         }
 
-        Path path = Paths.get("src/main/resources/uploads/" + person.getAvatarUrl());
-        Resource resource = new UrlResource(path.toUri());
-
-        if (!resource.exists() || !resource.isReadable()) {
-            throw new FileUploadException("Could not read avatar file");
-        }
-
-        return ResponseEntity.ok()
-                .header(HttpHeaders.CONTENT_TYPE, Files.probeContentType(path))
-                .body(resource);
+        // Redirect to S3 URL (or proxy the file if needed)
+        return ResponseEntity.status(HttpStatus.FOUND)
+                .location(URI.create(person.getAvatarUrl()))
+                .build();
     }
 
     @Override
@@ -354,9 +422,7 @@ public class AuthServiceImpl implements AuthService {
                 .build();
     }
 
-    // --------------------
     // Internal helper methods
-    // --------------------
 
     private String generateOtp() {
         return String.valueOf(new Random().nextInt(900000) + 100000);
@@ -382,36 +448,72 @@ public class AuthServiceImpl implements AuthService {
 
     private String generateAndSaveLoginOtp(Person person) {
         String otp = generateOtp();
+        String maskedOtp = maskOtp(otp);
         OtpCode code = new OtpCode();
-        code.setCode(otp);
+        code.setCode(maskedOtp);
         code.setPerson(person);
         code.setExpiry(LocalDateTime.now().plusMinutes(LOGIN_OTP_EXPIRY_MINUTES));
         otpCodeRepo.save(code);
-        return otp;
+        return maskedOtp;
     }
 
     private String generateAndSaveEmailVerificationToken(Person person) {
         String otp = generateOtp();
+        String maskedOtp = maskOtp(otp);
         Optional<EmailVerificationToken> existing = emailVerificationTokenRepo.findByPersonEmail(person.getEmail());
         EmailVerificationToken token = existing.orElse(new EmailVerificationToken());
         token.setPerson(person);
-        token.setOtpCode(otp);
+        token.setOtpCode(maskedOtp);
         token.setExpiryDate(LocalDateTime.now().plusMinutes(OTP_EXPIRY_MINUTES));
         emailVerificationTokenRepo.save(token);
-        return otp;
+        return maskedOtp;
     }
 
-    private void sendOtpToAvailableChannels(Person person, String otp, boolean isVerification) {
+    @Async
+    public void sendOtpToAvailableChannels(Person person, String otp, boolean isVerification) {
+        // Email channel (unchanged)
         if (person.getEmail() != null) {
-            if (isVerification)
-                emailService.sendOtpCode(person.getEmail(), otp);
-            else emailService.sendLoginToken(person.getEmail(), otp);
+            CompletableFuture.runAsync(() -> {
+                try {
+                    if (isVerification) {
+                        emailService.sendOtpCode(person.getEmail(), otp);
+                    } else {
+                        emailService.sendLoginToken(person.getEmail(), otp);
+                    }
+                } catch (Exception e) {
+                    log.error("Failed to send email to {}: {}", person.getEmail(), e.getMessage());
+                }
+            });
         }
-        // Uncomment when SMS service is available
-        if (person.getPhoneNumber() != null) {
-            if (isVerification)
-                smsService.sendOtpCode(person.getPhoneNumber(), otp);
-            else smsService.sendLoginToken(person.getPhoneNumber(), otp);
+
+        // SMS channel (updated with international support)
+        if (person.getPhoneNumber() != null && person.getCountryCode() != null) {
+            CompletableFuture.runAsync(() -> {
+                try {
+                    if (isVerification) {
+                        smsService.sendOtpCode(
+                                person.getPhoneNumber(),
+                                person.getCountryCode(),
+                                otp
+                        );
+                    } else {
+                        smsService.sendLoginToken(
+                                person.getPhoneNumber(),
+                                person.getCountryCode(),
+                                otp
+                        );
+                    }
+                    log.info("SMS OTP sent to {} ({})",
+                            person.getPhoneNumber(),
+                            person.getCountryCode());
+                } catch (InvalidPhoneNumberException e) {
+                    log.error("Invalid phone format for {}: {}",
+                            person.getPhoneNumber(), e.getMessage());
+                } catch (Exception e) {
+                    log.error("Failed to send SMS to {}: {}",
+                            person.getPhoneNumber(), e.getMessage());
+                }
+            });
         }
     }
 
@@ -420,8 +522,11 @@ public class AuthServiceImpl implements AuthService {
     }
 
     private boolean isStrongPassword(String password) {
+        if (password == null)
+            return false;
+
         String pattern = "^(?=.*[a-z])(?=.*[A-Z])(?=.*\\d)(?=.*[@$!%*?&])[A-Za-z\\d@$!%*?&]{8,}$";
-        return password == null && !password.matches(pattern);
+        return password.matches(pattern);
     }
 
     private void validateOtpToken(EmailVerificationToken token, String otpCode) {

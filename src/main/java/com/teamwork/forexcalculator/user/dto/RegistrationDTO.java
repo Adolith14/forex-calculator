@@ -25,6 +25,9 @@ public class RegistrationDTO {
     @Pattern(regexp = "^(?:\\+255|0)?[67]\\d{8}$", message = "Invalid Tanzania phone number")
     private String phoneNumber;
 
+    @NotBlank
+    private String countryCode;  // ISO country code (e.g., "US", "NG")
+
     @NotBlank(message = "Password is required")
     @Size(min = 8, message = "Password must be at least 8 characters")
     @Pattern(

@@ -4,11 +4,9 @@ import com.teamwork.forexcalculator.user.dto.*;
 import com.teamwork.forexcalculator.user.dto.smsHandling.SmsRequestDTO;
 import com.teamwork.forexcalculator.user.dto.smsHandling.SmsResponseDTO;
 import com.teamwork.forexcalculator.user.exceptionHandling.*;
-import com.teamwork.forexcalculator.user.repository.RefreshTokenRepository;
 import com.teamwork.forexcalculator.user.securities.jwt.JwtUtil;
 import com.teamwork.forexcalculator.user.service.personService.AuthService;
 import com.teamwork.forexcalculator.user.service.personService.TokenBlacklistService;
-import com.teamwork.forexcalculator.user.service.smsService.SmsService;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
@@ -17,8 +15,9 @@ import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
 
-import java.io.IOException;
+import java.net.URI;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
 
 @RestController
 @RequestMapping("/api/auth")
@@ -28,8 +27,6 @@ public class AuthController {
     private final AuthService authService;
     private final JwtUtil jwtUtil;
     private final TokenBlacklistService tokenBlacklistService;
-    private final RefreshTokenRepository refreshTokenRepository;
-    private final SmsService smsService;
 
     @PostMapping("/register")
     public ResponseEntity<ApiResponse<String>> register(@Valid @RequestBody RegistrationDTO request) {
@@ -63,43 +60,11 @@ public class AuthController {
             tokenBlacklistService.blacklistToken(accessToken);
         }
 
-        // Invalidate refresh token if provided
-       /* if (logoutRequest != null && logoutRequest.getRefreshToken() != null) {
-            refreshTokenService.invalidateToken(logoutRequest.getRefreshToken());
-        }*/
-
         return ResponseEntity.ok(Map.of(
                 "status", "success",
                 "message", "Logout completed successfully"
         ));
     }
-
-    /*@PostMapping("/refresh-token")
-    public ResponseEntity<?> refreshToken(@RequestBody RefreshTokenRequest request) {
-        try {
-            String refreshToken = request.getRefreshToken();
-
-            // Verify refresh token
-            if (!jwtUtil.validateToken(refreshToken)) {
-                throw new TokenRefreshException("Invalid refresh token");
-            }
-
-            // Check if refresh token exists in DB
-            RefreshToken storedToken = refreshTokenRepository.findByToken(refreshToken)
-                    .orElseThrow(() -> new TokenRefreshException("Refresh token not found"));
-
-            // Generate new access token
-            String email = jwtUtil.extractEmail(refreshToken);
-            String newAccessToken = jwtUtil.generateToken(email);
-
-            return ResponseEntity.ok(Map.of(
-                    "accessToken", newAccessToken,
-                    "refreshToken", refreshToken
-            ));
-        } catch (Exception e) {
-            return ResponseEntity.status(HttpStatus.FORBIDDEN).body(e.getMessage());
-        }
-    }*/
 
     @PostMapping("/verify-otp")
     public ResponseEntity<ApiResponse<String>> verifyOtp(@Valid @RequestBody LoginOtpVerifyDTO request) {
@@ -199,32 +164,42 @@ public class AuthController {
     }
 
     @PostMapping("/user/profile/avatar")
-    public ResponseEntity<ApiResponse<String>> uploadAvatar(@RequestParam("file") MultipartFile file,
-                                                            @RequestHeader("Authorization") String token) {
-        try {
-            String email = jwtUtil.extractEmail(token.replace("Bearer ", ""));
-            String response = authService.uploadAvatar(email, file);
-            return ResponseEntity.ok(new ApiResponse<>(true, response, null));
-        } catch (UserNotFoundException e) {
-            return ResponseEntity.status(HttpStatus.NOT_FOUND)
-                    .body(new ApiResponse<>(false, null, e.getMessage()));
-        } catch (FileUploadException e) {
-            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
-                    .body(new ApiResponse<>(false, null, e.getMessage()));
-        }
+    public CompletableFuture<ResponseEntity<ApiResponse<String>>> uploadAvatar(
+            @RequestParam("file") MultipartFile file,
+            @RequestHeader("Authorization") String token) {
+
+        String email = jwtUtil.extractEmail(token.replace("Bearer ", ""));
+
+        return authService.uploadAvatar(email, file)
+                .thenApply(response ->
+                        ResponseEntity.ok(new ApiResponse<>(true, response, null)))
+                .exceptionally(ex -> {
+                    if (ex.getCause() instanceof UserNotFoundException) {
+                        return ResponseEntity.status(HttpStatus.NOT_FOUND)
+                                .body(new ApiResponse<>(false, null, ex.getCause().getMessage()));
+                    } else {
+                        return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                                .body(new ApiResponse<>(false, null, ex.getCause().getMessage()));
+                    }
+                });
     }
 
     @GetMapping("/user/profile/avatar-image")
-    public ResponseEntity<?> getAvatar(@RequestHeader("Authorization") String token) {
+    public ResponseEntity<?> getAvatar(
+            @RequestHeader("Authorization") String token) {
+
         try {
             String email = jwtUtil.extractEmail(token.replace("Bearer ", ""));
-            return authService.getAvatarFile(email);
+            String avatarUrl = authService.getAvatarUrl(email); // New method in AuthService
+
+            // Return 302 redirect to S3 URL (or the URL directly)
+            return ResponseEntity.status(HttpStatus.FOUND)
+                    .location(URI.create(avatarUrl))
+                    .build();
+
         } catch (UserNotFoundException e) {
             return ResponseEntity.status(HttpStatus.NOT_FOUND)
                     .body(new ApiResponse<>(false, null, e.getMessage()));
-        } catch (IOException e) {
-            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
-                    .body(new ApiResponse<>(false, null, "Failed to retrieve avatar"));
         }
     }
 

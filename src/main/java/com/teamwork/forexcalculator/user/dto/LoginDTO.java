@@ -6,6 +6,7 @@ import lombok.Data;
 
 @Data
 public class LoginDTO {
+    private String countryCode;
 
     @NotBlank(message = "Email or phone number is required")
     private String emailOrPhoneNumber;
