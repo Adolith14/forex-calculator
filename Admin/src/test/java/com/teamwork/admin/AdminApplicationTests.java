@@ -1,10 +1,10 @@
-package com.teamwork.forexcalculator;
+package com.teamwork.admin;
 
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.test.context.SpringBootTest;
 
 @SpringBootTest
-class ForexCalculatorApplicationTests {
+class AdminApplicationTests {
 
     @Test
     void contextLoads() {

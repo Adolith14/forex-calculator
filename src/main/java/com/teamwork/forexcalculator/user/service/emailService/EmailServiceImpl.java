@@ -22,7 +22,7 @@ public class EmailServiceImpl implements EmailService {
                 + "This OTP is valid for 5 minutes.\n\n"
                 + "If you did not initiate this login, please ignore this email.\n\n"
                 + "Regards,\n"
-                + "The Forex Calculator Team";
+                + "The Lyntel Team";
 
         SimpleMailMessage message = new SimpleMailMessage();
         message.setTo(email);
@@ -38,13 +38,13 @@ public class EmailServiceImpl implements EmailService {
     @Override
     public String sendOtpCode(String email, String otp) {
         String messageText = "Hello,\n\n"
-                + "Thank you for registering with Forex Calculator.\n\n"
+                + "Thank you for registering with Lyntel's Software.\n\n"
                 + "Please use the following OTP to verify your email:\n\n"
                 + "🔐 OTP: " + otp + "\n\n"
                 + "This OTP is valid for 60 minutes.\n\n"
                 + "If you did not request this, please ignore this email.\n\n"
                 + "Regards,\n"
-                + "The Forex Calculator Team";
+                + "The Lyntel Team";
         SimpleMailMessage message = new SimpleMailMessage();
         message.setTo(email);
         message.setSubject("Email Verification OTP");

@@ -6,10 +6,10 @@ import org.springframework.scheduling.annotation.EnableAsync;
 
 @SpringBootApplication
 @EnableAsync
-public class ForexCalculatorApplication {
+public class UserManagementApplication {
 
     public static void main(String[] args) {
-        SpringApplication.run(ForexCalculatorApplication.class, args);
+        SpringApplication.run(UserManagementApplication.class, args);
     }
 
 }

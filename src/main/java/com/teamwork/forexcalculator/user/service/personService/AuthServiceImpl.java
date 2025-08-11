@@ -60,38 +60,50 @@ public class AuthServiceImpl implements AuthService {
 
         String otp = generateOtp();
         String maskedOtp = maskOtp(otp);
-        saveVerificationTokens(person, maskedOtp);
-        sendOtpToAvailableChannels(person, maskedOtp, true);
+        saveVerificationTokens(person, otp);
+        sendOtpToAvailableChannels(person, otp, true);
 
         return "Registration successful. Verification codes sent to your email and phone number.";
     }
     private String maskOtp(String otp) {
-        // Show first 2 and last 2 characters, mask others (e.g., 12****34)
+
         int length = otp.length();
         if (length <= 4) return "****";
 
-        String start = otp.substring(0, 2);
-        String end = otp.substring(length - 2);
+        String start = otp.substring(0, 1);
+        String end = otp.substring(length - 1);
         return start + "****" + end;
     }
 
     private void validateRegistration(RegistrationDTO registrationDTO) {
-        // ... existing validations ...
-
-        // Validate international phone number
-        if (!PhoneNumberValidator.isValid(registrationDTO.getPhoneNumber(), registrationDTO.getCountryCode())) {
-            throw new InvalidPhoneNumberException("Invalid phone number for country: " + registrationDTO.getCountryCode());
+        // Validate password match
+        if (!registrationDTO.getPassword().equals(registrationDTO.getConfirmPassword())) {
+            throw new PasswordMismatchException("Passwords do not match");
         }
 
-        // Convert to E164 format
+        // Validate email uniqueness
+        if (personRepo.findByEmail(registrationDTO.getEmail()).isPresent()) {
+            throw new DuplicateEmailException("Email already exists");
+        }
+
+        // Validate international phone number
+        if (!PhoneNumberValidator.isValid(
+                registrationDTO.getPhoneNumber(),
+                registrationDTO.getCountryCode())) {
+            throw new InvalidPhoneNumberException(
+                    "Invalid phone number for country " + registrationDTO.getCountryCode());
+        }
+
+        // Format to E164
         try {
             String formattedNumber = PhoneNumberValidator.formatE164(
                     registrationDTO.getPhoneNumber(),
                     registrationDTO.getCountryCode()
             );
-            registrationDTO.setPhoneNumber(formattedNumber); // +2348012345678
+            registrationDTO.setPhoneNumber(formattedNumber);
         } catch (NumberParseException e) {
-            throw new InvalidPhoneNumberException("Phone number parsing failed");
+            throw new InvalidPhoneNumberException(
+                    "Failed to format phone number: " + e.getMessage());
         }
 
         // Check for duplicates with formatted number
@@ -123,13 +135,13 @@ public class AuthServiceImpl implements AuthService {
             String otp = generateOtp();
             String maskedOtp = maskOtp(otp);
             saveVerificationTokens(person, maskedOtp);
-            sendOtpToAvailableChannels(person, maskedOtp, true);
+            sendOtpToAvailableChannels(person, otp, true);
             throw new AccountNotVerifiedException("Account not verified. Verification code sent.");
         }
 
         String loginOtp = generateAndSaveLoginOtp(person);
         String maskedOtp = maskOtp(loginOtp);
-        sendOtpToAvailableChannels(person, maskedOtp, false);
+        sendOtpToAvailableChannels(person, loginOtp, false);
 
         return "Login code has been sent to your registered email/phone.";
     }
@@ -230,7 +242,6 @@ public class AuthServiceImpl implements AuthService {
                 .orElseThrow(() -> new InvalidOtpException("No OTP found for this phone number"));
 
         validatePhoneOtp(otp, phoneOtp);
-
         Person person = otp.getPerson();
         person.setVerified(true);
         person.setPhoneNumberVerified(true);
@@ -423,7 +434,6 @@ public class AuthServiceImpl implements AuthService {
     }
 
     // Internal helper methods
-
     private String generateOtp() {
         return String.valueOf(new Random().nextInt(900000) + 100000);
     }
@@ -450,11 +460,11 @@ public class AuthServiceImpl implements AuthService {
         String otp = generateOtp();
         String maskedOtp = maskOtp(otp);
         OtpCode code = new OtpCode();
-        code.setCode(maskedOtp);
+        code.setCode(otp);
         code.setPerson(person);
         code.setExpiry(LocalDateTime.now().plusMinutes(LOGIN_OTP_EXPIRY_MINUTES));
         otpCodeRepo.save(code);
-        return maskedOtp;
+        return otp;
     }
 
     private String generateAndSaveEmailVerificationToken(Person person) {
